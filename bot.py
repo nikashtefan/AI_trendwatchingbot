@@ -1,7 +1,6 @@
 import os
-import asyncio
 import logging
-from datetime import time, timezone, timedelta
+from datetime import timezone, timedelta
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -13,7 +12,6 @@ from news import get_weekly_digest
 
 # === Config ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-# Moscow timezone UTC+3
 MSK = timezone(timedelta(hours=3))
 
 logging.basicConfig(
@@ -21,6 +19,59 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+# === Send digest to one user ===
+
+async def send_digest_to_chat(bot, chat_id: int, news_items: list[dict]):
+    """Send digest as a series of messages with photos."""
+    # Header
+    await bot.send_message(
+        chat_id=chat_id,
+        text="📰 *AI-новости недели — что попробовать прямо сейчас*",
+        parse_mode="Markdown",
+    )
+
+    for item in news_items:
+        # Last item is outro
+        if "outro" in item:
+            await bot.send_message(chat_id=chat_id, text=item["outro"])
+            continue
+
+        emoji = item.get("emoji", "📌")
+        title = item.get("title", "")
+        text = item.get("text", "")
+        link = item.get("link", "")
+        image_url = item.get("image_url", "")
+
+        caption = f"{emoji} *{title}*\n\n{text}"
+        if link:
+            caption += f"\n\n🔗 [Читать подробнее]({link})"
+
+        # Telegram caption limit is 1024 chars
+        if len(caption) > 1024:
+            caption = caption[:1020] + "..."
+
+        if image_url:
+            try:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=image_url,
+                    caption=caption,
+                    parse_mode="Markdown",
+                )
+                continue
+            except Exception as e:
+                logger.warning(f"Failed to send photo {image_url[:50]}: {e}")
+                # Fall through to text-only
+
+        # Text-only fallback
+        await bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
 
 
 # === Commands ===
@@ -32,13 +83,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! 👋\n\n"
         "Я — бот, который каждую пятницу в 18:00 (МСК) присылает "
-        "дайджест самых важных AI-новостей за неделю.\n\n"
-        "Топ-5 новостей с кратким описанием на русском + ссылки на источники.\n\n"
+        "топ-5 AI-новостей за неделю 🤖\n\n"
+        "Простым языком, с картинками и ссылками.\n"
+        "Никакого техно-жаргона — только то, что реально можно попробовать.\n\n"
         "✅ Ты подписан(а) на рассылку!\n\n"
-        "Команды:\n"
         "/digest — получить дайджест прямо сейчас\n"
         "/stop — отписаться\n\n"
-        f"Подписчиков: {count}"
+        f"Нас уже: {count} 🙌"
     )
 
 
@@ -46,7 +97,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     removed = remove_subscriber(update.effective_user.id)
     if removed:
         await update.message.reply_text(
-            "Ты отписан(а) от рассылки. 😔\n"
+            "Ты отписан(а) от рассылки 😔\n"
             "Напиши /start если передумаешь!"
         )
     else:
@@ -55,15 +106,9 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def digest_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Get digest right now (for testing or on-demand)."""
-    await update.message.reply_text("⏳ Собираю новости, подожди минутку...")
-    text = await get_weekly_digest()
-    # Split long messages (Telegram limit 4096 chars)
-    if len(text) > 4000:
-        parts = split_message(text, 4000)
-        for part in parts:
-            await update.message.reply_text(part, parse_mode="Markdown", disable_web_page_preview=True)
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    await update.message.reply_text("⏳ Собираю свежие новости, подожди минутку...")
+    news_items = await get_weekly_digest()
+    await send_digest_to_chat(context.bot, update.effective_chat.id, news_items)
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,30 +116,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📊 Подписчиков: {count}")
 
 
-def split_message(text: str, max_len: int = 4000) -> list[str]:
-    """Split long text into chunks by double newline."""
-    if len(text) <= max_len:
-        return [text]
-    parts = []
-    current = ""
-    for paragraph in text.split("\n\n"):
-        if len(current) + len(paragraph) + 2 > max_len:
-            if current:
-                parts.append(current.strip())
-            current = paragraph
-        else:
-            current += "\n\n" + paragraph if current else paragraph
-    if current:
-        parts.append(current.strip())
-    return parts
-
-
 # === Scheduled sending ===
 
 async def send_weekly_digest(app: Application):
     """Send digest to all subscribers."""
     logger.info("Starting weekly digest...")
-    text = await get_weekly_digest()
+    news_items = await get_weekly_digest()
     subscribers = get_all_subscribers()
     logger.info(f"Sending to {len(subscribers)} subscribers")
 
@@ -102,22 +129,10 @@ async def send_weekly_digest(app: Application):
     failed = 0
     for user_id in subscribers:
         try:
-            if len(text) > 4000:
-                parts = split_message(text, 4000)
-                for part in parts:
-                    await app.bot.send_message(
-                        chat_id=user_id, text=part,
-                        parse_mode="Markdown", disable_web_page_preview=True,
-                    )
-            else:
-                await app.bot.send_message(
-                    chat_id=user_id, text=text,
-                    parse_mode="Markdown", disable_web_page_preview=True,
-                )
+            await send_digest_to_chat(app.bot, user_id, news_items)
             sent += 1
         except Exception as e:
             logger.warning(f"Failed to send to {user_id}: {e}")
-            # Remove blocked/deleted users
             if "Forbidden" in str(e) or "blocked" in str(e).lower():
                 remove_subscriber(user_id)
                 logger.info(f"Removed blocked user {user_id}")
@@ -135,7 +150,6 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("digest", digest_now))
@@ -145,7 +159,7 @@ def main():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         send_weekly_digest,
-        CronTrigger(day_of_week="fri", hour=15, minute=0),  # 15:00 UTC = 18:00 MSK
+        CronTrigger(day_of_week="fri", hour=15, minute=0),
         args=[app],
         id="weekly_digest",
         name="Weekly AI Digest",
