@@ -26,27 +26,34 @@ RSS_FEEDS = [
 ]
 
 
-async def fetch_og_image(url: str) -> str:
-    """Fetch og:image from a webpage URL."""
+async def generate_image(title: str) -> str:
+    """Generate an image for a news item using DALL-E 2 via ProxyAPI."""
+    if not PROXY_API_KEY:
+        return ""
+
+    prompt = f"Modern minimalist illustration for a news article: {title}. Clean flat design, vibrant colors, no text."
+
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            # Search for og:image meta tag
-            match = re.search(
-                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-                resp.text,
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{PROXY_API_BASE}/images/generations",
+                headers={
+                    "Authorization": f"Bearer {PROXY_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "dall-e-2",
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": "512x512",
+                },
             )
-            if not match:
-                # Try reverse order (content before property)
-                match = re.search(
-                    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image',
-                    resp.text,
-                )
-            if match:
-                return match.group(1)
+            response.raise_for_status()
+            data = response.json()
+            return data["data"][0]["url"]
     except Exception as e:
-        print(f"[OG] Error fetching {url}: {e}")
-    return ""
+        print(f"[DALL-E] Error generating image: {e}")
+        return ""
 
 
 def fetch_articles(days: int = 7) -> list[dict]:
@@ -225,13 +232,13 @@ async def get_weekly_digest() -> list[dict]:
                 "link": a["link"],
             })
 
-    # Fetch og:image for each news item
+    # Generate images for each news item via DALL-E 2
     for item in news_items:
-        link = item.get("link", "")
-        if link:
-            image_url = await fetch_og_image(link)
+        title = item.get("title", "")
+        if title:
+            image_url = await generate_image(title)
             item["image_url"] = image_url
-            print(f"[OG] {link[:50]} -> {'found' if image_url else 'no image'}")
+            print(f"[DALL-E] {title[:40]} -> {'generated' if image_url else 'failed'}")
         else:
             item["image_url"] = ""
 
