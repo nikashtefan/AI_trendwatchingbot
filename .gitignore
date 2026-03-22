@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+subscribers.db
+*.db-wal
+*.db-shm
